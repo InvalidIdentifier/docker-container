@@ -1,0 +1,66 @@
+---
+# docker login for seafile
+- name: seafile cr login
+  command: docker login docker.seadrive.org --username seafile --password '{{ seafile_docker_login }}'
+
+# install software prerequisites
+- name: install apt packages
+  apt:
+    name: "{{ packages }}"
+    state: present
+  vars:
+    packages:
+      - cifs-utils
+
+# create directory for bindmount folders
+- name: create directory bindmounts
+  file:
+    path: /data/bindmounts
+    state: directory
+    mode: '0755'
+
+# create directories for bindmount
+- name: create bindmount directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /data/bindmounts/homeassistant
+    - /data/bindmounts/promtail
+    - /data/bindmounts/traefik
+
+# copy blackbox config
+- name: copy config for homeassistant
+  template:
+    src: SERVICE_ACCOUNT.JSON.j2
+    dest: /data/bindmounts/homeassistant/SERVICE_ACCOUNT.JSON
+
+# copy promtail config
+- name: copy config for promtail
+  template:
+    src: config.yml.j2
+    dest: /data/bindmounts/promtail/config.yml
+
+# copy traefik config
+- name: copy config for traefik
+  template:
+    src: dynamic_conf.yml.j2
+    dest: /data/bindmounts/traefik/dynamic_conf.yml
+
+# copy docker-compose.yml
+- name: copy docker-compose.yml
+  template:
+    src: docker-compose.yml.j2
+    dest: /home/user/docker-compose.yml
+
+# create .env from variable
+- name: create .env file
+  ansible.builtin.copy:
+    dest: /home/user/.env
+    content: "{{ lookup('env', 'DOCKER_ENV') }}"
+
+# run docker container
+- name: start containers
+  command: docker compose up -d --remove-orphans
+...

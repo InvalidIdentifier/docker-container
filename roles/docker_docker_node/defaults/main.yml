@@ -1,0 +1,9 @@
+---
+domain: "{{ lookup('env', 'DOMAIN') }}"
+domain_old: "{{ lookup('env', 'DOMAIN_OLD') }}"
+google_ha_project_id: "{{ lookup('env', 'GOOGLE_HA_PROJECT_ID') }}"
+google_ha_private_key: "{{ lookup('env', 'GOOGLE_HA_PRIVATE_KEY') }}"
+google_ha_client_mail: "{{ lookup('env', 'GOOGLE_HA_CLIENT_MAIL') }}"
+google_ha_client_id: "{{ lookup('env', 'GOOGLE_HA_CLIENT_ID') }}"
+google_ha_client_cert_url: "{{ lookup('env', 'GOOGLE_HA_CLIENT_CERT_URL') }}"
+seafile_docker_login: "{{ lookup('env', 'SEAFILE_DOCKER_LOGIN') }}"

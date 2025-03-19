@@ -1,0 +1,733 @@
+name: homelab
+
+services:
+
+### Reverse Proxy ###
+
+  traefik122:
+    image: traefik:v2.11
+    container_name: traefik122
+    hostname: traefik122.${DOMAIN}
+    environment:
+      - TZ=Europe/Berlin
+      - CF_DNS_API_TOKEN=${TRAEFIK_CF_DNS_API_TOKEN}
+    command:
+      - "--api.dashboard=true"
+      - "--api.debug=true"
+      - "--accesslog.filePath=/etc/traefik/access.log"
+      - "--accesslog.bufferingsize=100"
+      - "--accesslog.fields.defaultmode=keep"
+      - "--accesslog.fields.names.ClientUsername=drop"
+      - "--accesslog.fields.headers.defaultmode=keep"
+      #- "--core.defaultrulesyntax=v2"
+      - "--log.filePath=/etc/traefik/traefik.log"
+      - "--log.level=DEBUG"
+      - "--entrypoints.http.address=:80"
+      - "--entryPoints.http.forwardedHeaders.trustedIPs=127.0.0.1/32,${TRAEFIK_CONF_VLAN_INFRA}.100"
+      - "--entrypoints.https.address=:443"
+      - "--entryPoints.https.forwardedHeaders.trustedIPs=127.0.0.1/32,${TRAEFIK_CONF_VLAN_INFRA}.100"
+      - "--entrypoints.loki.address=:3100"
+      - "--entrypoints.nodeexporter.address=:9100"
+      - "--entryPoints.nodeexporter.transport.respondingTimeouts.readTimeout=0"
+      - "--entrypoints.cadvisor.address=:8080"
+      - "--entrypoints.unpoller.address=:9130"
+      - "--entryPoints.unpoller.transport.respondingTimeouts.readTimeout=0"
+      - "--entrypoints.ntfysmtp.address=:25"
+      - "--providers.docker.endpoint=unix:///var/run/docker.sock"
+      - "--providers.docker.exposedByDefault=false"
+      - "--providers.file.filename=/etc/traefik/dynamic_conf.yml"
+      - "--certificatesresolvers.cloudflare.acme.email=${EMAIL_ME}"
+      - "--certificatesresolvers.cloudflare.acme.storage=/etc/traefik/acme.json"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+      - "--serverstransport.insecureskipverify=true"
+    volumes:
+      - '/var/run/docker.sock:/var/run/docker.sock:ro'
+      - '/etc/localtime:/etc/localtime:ro'
+      - '/data/bindmounts/traefik:/etc/traefik/'
+    networks: {web: {ipv4_address: "172.21.0.104"}}
+    dns: ["${DNS_SERVER}"]
+    ports:
+      - '443:443/tcp' # http
+      - '80:80/tcp'   # https
+      - '9100:9100'   # node exporter
+      - '8080:8080'   # cadvisor
+      - '9130:9130'   # unpoller
+    privileged: true
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.http.routers.traefik122.entrypoints=http
+      - traefik.http.routers.traefik122.rule=Host(`traefik122.${DOMAIN}`)
+      - traefik.http.middlewares.traefik-https-redirect.redirectscheme.scheme=https
+      - traefik.http.routers.traefik122.middlewares=traefik-https-redirect
+      #Secure
+      - traefik.http.routers.traefik122-secure.entrypoints=https
+      - traefik.http.routers.traefik122-secure.rule=Host(`traefik122.${DOMAIN}`)
+      - traefik.http.routers.traefik122-secure.tls=true
+      - traefik.http.routers.traefik122-secure.tls.certresolver=cloudflare
+      - 'traefik.http.routers.traefik122-secure.tls.domains[0].main=lifeispain.org'
+      - 'traefik.http.routers.traefik122-secure.tls.domains[0].sans=*.lifeispain.org'
+      - 'traefik.http.routers.traefik122-secure.tls.domains[1].main=${DOMAIN}'
+      - 'traefik.http.routers.traefik122-secure.tls.domains[1].sans=*.${DOMAIN}'
+      - traefik.http.routers.traefik122-secure.service=api@internal
+      #Provider
+      - providers.file=true
+      - providers.file.filename=/etc/traefik/dynamic_conf.yml
+      - providers.file.watch=true
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+    extra_hosts:
+      - host.docker.internal:172.17.0.1
+    restart: unless-stopped
+
+  traefik-forward-auth:
+    image: thomseddon/traefik-forward-auth:latest
+    container_name: traefik-forward-auth
+    environment:
+      - PROVIDERS_GOOGLE_CLIENT_ID=${FWD_AUTH_PROVIDERS_GOOGLE_CLIENT_ID}
+      - PROVIDERS_GOOGLE_CLIENT_SECRET=${FWD_AUTH_PROVIDERS_GOOGLE_CLIENT_SECRET}
+      - SECRET=${FWD_AUTH_SECRET_FORWARD}
+      - AUTH_HOST=oauth.${DOMAIN}
+      - COOKIE_DOMAIN=${DOMAIN}
+      - WHITELIST=${FWD_AUTH_WHITELIST_USERS}
+      - INSECURE_COOKIE=false
+      - LOG_LEVEL=debug
+      - LIFETIME=2592000 #30Days
+    volumes:
+      - '/etc/localtime:/etc/localtime:ro'
+    dns: ["${DNS_SERVER}"]
+    network_mode: web
+    restart: unless-stopped
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.http.routers.forward.entrypoints=https
+      - traefik.http.routers.forward.rule=Host(`oauth.${DOMAIN}`)
+      - traefik.http.routers.forward-secure.entrypoints=https
+      - traefik.http.routers.forward-secure.rule=Host(`oauth.${DOMAIN}`)
+      - traefik.http.routers.forward-secure.middlewares=forward-auth-verify
+      - traefik.http.routers.forward-secure.tls=true
+      - traefik.http.routers.forward-secure.service=forward
+      - traefik.http.services.forward.loadbalancer.server.port=4181
+      #Middleware
+      - 'traefik.http.middlewares.forward-auth-verify.forwardauth.address=http://traefik-forward-auth:4181'
+      - 'traefik.http.middlewares.forward-auth-verify.forwardauth.authResponseHeaders=X-Forwarded-User'
+      - traefik.http.routers.forward.service=forward
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+### Monitoring ###
+
+  node_exporter122:
+    image: quay.io/prometheus/node-exporter:latest
+    container_name: node_exporter122
+    hostname: nodeexplorer.${DOMAIN}
+    volumes:
+      - '/:/host:ro,rslave'
+      - '/etc/localtime:/etc/localtime:ro'
+    dns: ["${DNS_SERVER}"]
+    network_mode: web
+    command:
+      - '--path.rootfs=/host'
+    pid: host
+    restart: unless-stopped
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.tcp.routers.nodeexporter.entrypoints=nodeexporter
+      - "traefik.tcp.routers.nodeexporter.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.nodeexporter.service=nodeexporter"
+      - traefik.tcp.services.nodeexporter.loadbalancer.server.port=9100
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  cadvisor122:
+    image: gcr.io/cadvisor/cadvisor:v0.45.0
+    container_name: cadvisor122
+    hostname: cadvisor.${DOMAIN}
+    dns: ["${DNS_SERVER}"]
+    network_mode: web
+    volumes:
+      - '/:/rootfs:ro'
+      - '/var/run:/var/run:ro'
+      - '/sys:/sys:ro'
+      - '/var/lib/docker/:/var/lib/docker:ro'
+      - '/dev/disk/:/dev/disk:ro'
+      - '/etc/localtime:/etc/localtime:ro'
+    devices:
+      - /dev/kmsg
+    restart: unless-stopped
+    privileged: true
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.tcp.routers.cadvisor.entrypoints=cadvisor
+      - "traefik.tcp.routers.cadvisor.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.cadvisor.service=cadvisor"
+      - traefik.tcp.services.cadvisor.loadbalancer.server.port=8080
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  promtail122:
+    image: grafana/promtail:latest
+    container_name: promtail122
+    hostname: promtail122.${DOMAIN}
+    volumes:
+      - '/var/lib/docker/containers:/var/lib/docker/containers:ro'
+      - '/var/run/docker.sock:/var/run/docker.sock'
+      - '/data/bindmounts/promtail:/etc/promtail'
+      - '/var/log:/var/log'
+      - '/etc/localtime:/etc/localtime:ro'
+    command: -config.file=/etc/promtail/config.yml
+    dns: ["${DNS_SERVER}"]
+    network_mode: web
+    restart: unless-stopped
+    labels:
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+### Patchmanagement ###
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_DEBUG=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_NOTIFICATIONS_LEVEL=info
+      - WATCHTOWER_SCHEDULE=0 0 0 1 * *
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+      - WATCHTOWER_ROLLING_RESTART=true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/localtime:/etc/localtime:ro
+    dns: ["${DNS_SERVER}"]
+    network_mode: web
+    labels:
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+### Homeassistant Stack ###
+
+  homeassistant:
+    image: homeassistant/home-assistant:latest
+    container_name: homeassistant
+    hostname: homeassistant.${DOMAIN}
+    dns: ["${DNS_SERVER}"]
+    volumes:
+      - '/data/bindmounts/homeassistant:/config' 
+      - '/etc/localtime:/etc/localtime:ro'
+    network_mode: host
+    restart: unless-stopped
+    labels:
+    # Traefik
+      #Insecure intern
+      - traefik.enable=true
+      - traefik.http.routers.ha.entrypoints=http
+      - traefik.http.routers.ha.rule=Host(`homeassistant.${DOMAIN}`)
+      - traefik.http.routers.ha.middlewares=traefik-https-redirect
+      - traefik.http.services.ha.loadbalancer.server.port=8123
+      - traefik.http.routers.ha.service=ha
+      #Secure intern
+      - traefik.http.routers.ha-secure.entrypoints=https
+      - traefik.http.routers.ha-secure.rule=Host(`homeassistant.${DOMAIN}`)
+      - traefik.http.routers.ha-secure.middlewares=forward-auth-verify
+      - traefik.http.routers.ha-secure.tls=true
+      - traefik.http.routers.ha-secure.service=ha
+      # Secure + GoogleAssistant + OpenAuth
+      - traefik.http.routers.ha-secure-ga.entrypoints=https
+      - 'traefik.http.routers.ha-secure-ga.rule=(Host(`homeassistant.${DOMAIN}`) && PathPrefix(`/api/google_assistant`)) || (Host(`homeassistant.${DOMAIN}`) && PathPrefix(`/auth/token`))'
+      - traefik.http.routers.ha-secure-ga.tls=true
+      - traefik.http.routers.ha-secure-ga.service=ha
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  influxdbHa:
+    image: "influxdb:latest"
+    container_name: influxdb
+    hostname: "influx.${DOMAIN}"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUX_HA_INFLUXDB_ADMIN}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUX_HA_INFLUXDB_ADMIN_PASSWORD}
+      - DOCKER_INFLUXDB_INIT_ORG=home
+      - DOCKER_INFLUXDB_INIT_BUCKET=HA
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_HA_DOCKER_INFLUXDB_INIT_ADMIN_TOKEN}
+      - TZ= 'Europe/Berlin'
+    volumes:
+      - '/data/bindmounts/influx/conf:/etc/influxdb2'
+      - '/data/bindmounts/influx/data:/var/lib/influxdb2'
+      - '/data/bindmounts/influx/backup:/backup'
+      - '/etc/localtime:/etc/localtime:ro'
+    dns: ["${DNS_SERVER}"]
+    networks: {web: {ipv4_address: "172.21.0.101"}}
+    restart: unless-stopped
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.http.routers.influx.entrypoints=http
+      - traefik.http.routers.influx.rule=Host(`influx.${DOMAIN}`)
+      - traefik.http.routers.influx.middlewares=traefik-https-redirect
+      - traefik.http.routers.influx-secure.entrypoints=https
+      - traefik.http.routers.influx-secure.rule=Host(`influx.${DOMAIN}`)
+      - traefik.http.routers.influx-secure.tls=true
+      - traefik.http.routers.influx-secure.service=influx
+      - traefik.http.services.influx.loadbalancer.server.port=8086
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  grafanaAppHa:
+    image: grafana/grafana:latest
+    container_name: grafanaAppHa
+    hostname: grafanaApp.${DOMAIN}
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_GF_SECURITY_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_GF_SECURITY_ADMIN_PASSWORD}
+      - GF_DATABASE_TYPE=postgres
+      - GF_DATABASE_HOST=grafanaDbHa
+      - GF_DATABASE_PORT=5432
+      - GF_DATABASE_NAME=grafana
+      - GF_DATABASE_USER=${GRAFANA_DB_USER_NAME}
+      - GF_DATABASE_PASSWORD=${GRAFANA_DB_USER_PASS}
+      - GF_SERVER_ROOT_URL=https://sensors.${DOMAIN}
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    dns: ["${DNS_SERVER}"]
+    network_mode: web
+    restart: unless-stopped
+    depends_on:
+      - grafanaDbHa
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.http.routers.sensors.entrypoints=http
+      - traefik.http.routers.sensors.rule=Host(`sensors.${DOMAIN}`)
+      - traefik.http.routers.sensors.middlewares=traefik-https-redirect
+      - traefik.http.routers.sensors-secure.entrypoints=https
+      - traefik.http.routers.sensors-secure.rule=Host(`sensors.${DOMAIN}`)
+      - traefik.http.routers.sensors-secure.tls=true
+      - traefik.http.routers.sensors-secure.service=sensors
+      - traefik.http.services.sensors.loadbalancer.server.port=3000
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  grafanaDbHa:
+    image: postgres:16
+    container_name: grafanaDbHa
+    environment:
+      - POSTGRES_DB=grafana
+      - POSTGRES_USER=${GRAFANA_DB_USER_NAME}
+      - POSTGRES_PASSWORD=${GRAFANA_DB_USER_PASS}
+    volumes:
+      - '/data/bindmounts/grafana/data:/var/lib/postgresql/data'
+      - '/data/bindmounts/grafana/backup:/backup'
+    dns: ["${DNS_SERVER}"]
+    network_mode: web
+    restart: unless-stopped
+    labels:
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+### EDMS Stack ###
+
+  paperlessBroker:
+    image: docker.io/library/redis:7
+    container_name: paperlessBroker
+    hostname: paperlessBroker.${DOMAIN}
+    volumes:
+      - '/etc/localtime:/etc/localtime:ro'
+      - '/data/bindmounts/paperless/broker:/data'
+    dns: ["${DNS_SERVER}"]
+    network_mode: web
+    restart: unless-stopped
+    labels:
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  paperlessDb:
+    image: docker.io/library/postgres:13
+    container_name: paperlessDb
+    hostname: paperlessDb.${DOMAIN}
+    environment:
+      POSTGRES_DB: ${PAPERLESS_POSTGRES_DB}
+      POSTGRES_USER: ${PAPERLESS_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${PAPERLESS_POSTGRES_PASSWORD}
+    volumes:
+      - '/data/bindmounts/paperless/db:/var/lib/postgresql/data'
+      - '/etc/localtime:/etc/localtime:ro'
+    dns: ["${DNS_SERVER}"]
+    network_mode: web
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    labels:
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  paperlessWeb:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    container_name: paperlessWeb
+    hostname: paperlessWeb.${DOMAIN}
+    environment: 
+      PAPERLESS_REDIS: redis://paperlessBroker:6379
+      PAPERLESS_DBHOST: paperlessDb
+      PAPERLESS_DBPASS: ${PAPERLESS_POSTGRES_PASSWORD}
+      USERMAP_UID: 1000
+      USERMAP_GID: 1000
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY}
+      PAPERLESS_TIME_ZONE: Europe/Berlin
+      PAPERLESS_OCR_LANGUAGE: deu
+      PAPERLESS_URL: ${PAPERLESS_URL}
+      PAPERLESS_ADMIN_USER: ${PAPERLESS_ADMIN_USER}
+      PAPERLESS_ADMIN_PASSWORD: ${PAPERLESS_ADMIN_PASSWORD}
+      PAPERLESS_ADMIN_MAIL: ${PAPERLESS_ADMIN_MAIL}
+    volumes:
+      - '/data/docker/paperless/consume:/usr/src/paperless/consume'
+      - '/data/bindmounts/paperless/web:/usr/src/paperless/data'
+      - '/data/bindmounts/paperless/webmedia:/usr/src/paperless/media'
+      - '/data/bindmounts/paperless/export:/usr/src/paperless/export'
+      - '/etc/localtime:/etc/localtime:ro'
+    dns: ["${DNS_SERVER}"]
+    network_mode: web
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "-S", "--max-time", "2", "http://localhost:8000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      - paperlessDb
+      - paperlessBroker
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.http.routers.paperless.entrypoints=http
+      - traefik.http.routers.paperless.rule=Host(`paperless.${DOMAIN}`)
+      - traefik.http.routers.paperless.middlewares=traefik-https-redirect
+      - traefik.http.services.paperless.loadbalancer.server.port=8000
+      #Secure
+      - traefik.http.routers.paperless-secure.entrypoints=https
+      - traefik.http.routers.paperless-secure.rule=Host(`paperless.${DOMAIN}`)
+      - traefik.http.routers.paperless-secure.tls=true
+      - traefik.http.routers.paperless-secure.service=paperless
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+### Tools ###
+
+  # watchyourlan #
+
+  wyl:
+    image: aceberg/watchyourlan
+    container_name: watchyourlan
+    hostname: watchyourlan.${DOMAIN}
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+    - '/data/bindmounts/watchyourlan:/data'
+    - '/etc/localtime:/etc/localtime:ro'
+    environment:
+      TZ: Europe/Berlin
+      IFACE: "eno1 eno1.1 eno1.3 eno1.5"
+      DBPATH: "/data/db.sqlite"
+      GUIPORT: "8840"
+      TIMEOUT: "60"
+      SHOUTRRR_URL: ${WYL_SHOUTRRR_URL}
+      THEME: "slate"
+      IGNOREIP: "no"
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.http.routers.wyl.entrypoints=http
+      - traefik.http.routers.wyl.rule=Host(`wyl.${DOMAIN}`)
+      - traefik.http.routers.wyl.middlewares=traefik-https-redirect
+      - traefik.http.routers.wyl-secure.entrypoints=https
+      - traefik.http.routers.wyl-secure.rule=Host(`wyl.${DOMAIN}`)
+      - traefik.http.routers.wyl-secure.tls=true
+      - traefik.http.routers.wyl-secure.service=wyl
+      - traefik.http.services.wyl.loadbalancer.server.port=8840
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # meTube #
+
+  metube:
+    image: ghcr.io/alexta69/metube
+    container_name: metube
+    hostname: tube.${DOMAIN}
+    dns: ["${DNS_SERVER}"]
+    user: 0:0
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - PUID=0
+      - PGID=0
+    network_mode: web
+    restart: unless-stopped
+    volumes:
+      - '/data/docker/tube/downloads:/downloads'
+      - '/etc/localtime:/etc/localtime:ro'
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.http.routers.tube.entrypoints=http
+      - traefik.http.routers.tube.rule=Host(`tube.${DOMAIN}`)
+      - traefik.http.routers.tube.middlewares=traefik-https-redirect
+      - traefik.http.routers.tube-secure.entrypoints=https
+      - traefik.http.routers.tube-secure.rule=Host(`tube.${DOMAIN}`)
+      - traefik.http.routers.tube-secure.tls=true
+      - traefik.http.routers.tube-secure.service=tube
+      - traefik.http.services.tube.loadbalancer.server.port=8081
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+### Organization ###
+
+  # Taskmanagement # 
+
+  vikunjaApp:
+    image: vikunja/vikunja
+    container_name: vikunjaApp
+    hostname: vikunjaApp.${DOMAIN}
+    environment:
+      VIKUNJA_SERVICE_PUBLICURL: ${VIKUNJA_SERVICE_PUBLICURL}
+      VIKUNJA_DATABASE_HOST: vikunjaDb
+      VIKUNJA_DATABASE_PASSWORD: ${VIKUNJA_DATABASE_PASSWORD}
+      VIKUNJA_DATABASE_TYPE: postgres
+      VIKUNJA_DATABASE_USER: ${VIKUNJA_DATABASE_USER}
+      VIKUNJA_DATABASE_DATABASE: ${VIKUNJA_DATABASE_DATABASE}
+      VIKUNJA_SERVICE_JWTSECRET: ${VIKUNJA_SERVICE_JWTSECRET}
+    volumes:
+      - '/data/bindmounts/task/app:/app/vikunja/files'
+    network_mode: web
+    dns: ["${DNS_SERVER}"]
+    restart: unless-stopped
+    depends_on:
+      vikunjaDb:
+        condition: service_healthy
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.http.routers.tasks.entrypoints=http
+      - traefik.http.routers.tasks.rule=Host(`tasks.${DOMAIN}`)
+      - traefik.http.routers.tasks.middlewares=traefik-https-redirect
+      - traefik.http.routers.tasks-secure.entrypoints=https
+      - traefik.http.routers.tasks-secure.rule=Host(`tasks.${DOMAIN}`)
+      - traefik.http.routers.tasks-secure.tls=true
+      - traefik.http.routers.tasks-secure.service=tasks
+      - traefik.http.services.tasks.loadbalancer.server.port=3456
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  vikunjaDb:
+    image: postgres:16
+    container_name: vikunjaDb
+    hostname: vikunjaDb.${DOMAIN}
+    environment:
+      POSTGRES_PASSWORD: ${VIKUNJA_DATABASE_PASSWORD}
+      POSTGRES_USER: ${VIKUNJA_DATABASE_USER}
+    volumes:
+      - '/data/bindmounts/task/db:/var/lib/postgresql/data'
+      - '/data/bindmounts/task/backup:/backup'
+    network_mode: web
+    dns: ["${DNS_SERVER}"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -U $$POSTGRES_USER"]
+      interval: 2s
+    labels:
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # # seafile # 
+
+  seafile-mysql:
+    image: mariadb:10.11
+    container_name: seafile-mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=${SEAFILE_MYSQL_ROOT_PASSWORD}
+      - MYSQL_LOG_CONSOLE=true
+    volumes:
+      - '/data/bindmounts/seafile/db/data:/var/lib/mysql'
+      - '/etc/localtime:/etc/localtime:ro'
+      - '/data/bindmounts/seafile/db/backup:/backup'
+    network_mode: web
+    dns: ["${DNS_SERVER}"]
+    restart: unless-stopped
+
+  seafile-memcached:
+    image: memcached:1.6.18
+    container_name: seafile-memcached
+    entrypoint: memcached -m 256
+    network_mode: web
+    dns: ["${DNS_SERVER}"]
+    restart: unless-stopped
+          
+  seafile:
+    image: docker.seadrive.org/seafileltd/seafile-pro-mc:latest
+    container_name: seafile
+    volumes:
+      - '/data/bindmounts/seafile/fuse:/seafile-fuse'
+      - '/data/bindmounts/seafile/app/data:/shared'
+      - '/etc/localtime:/etc/localtime:ro'
+      - type: bind                                  # This is a specific type of volume mount called Bind-Mount
+        bind:                                       # which allows you to submount folders in it,
+          propagation: shared                       # from the host side, or from the container side.
+        source: /data/bindmounts/seafile/export     # The goal is to submount seafile database in it using seaf-fuse
+        target: /seafile-fuse
+    environment:
+      - DB_HOST=seafile-mysql
+      - DB_ROOT_PASSWD=${SEAFILE_MYSQL_ROOT_PASSWORD}
+      - TIME_ZONE=Europe/Berlin
+      - SEAFILE_ADMIN_EMAIL=${SEAFILE_ADMIN_EMAIL}
+      - SEAFILE_ADMIN_PASSWORD=${SEAFILE_ADMIN_PASSWORD}
+      - SEAFILE_SERVER_LETSENCRYPT=false
+      - SEAFILE_SERVER_HOSTNAME=file.${DOMAIN}
+    depends_on:
+      - seafile-mysql
+      - seafile-memcached
+    network_mode: web
+    dns: ["${DNS_SERVER}"]
+    restart: unless-stopped
+    cap_add:
+      - SYS_ADMIN   
+    devices:
+      - "/dev/fuse:/dev/fuse"
+    privileged: true
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.http.routers.file.entrypoints=http
+      - traefik.http.routers.file.rule=Host(`file.${DOMAIN}`)
+      - traefik.http.routers.file.middlewares=traefik-https-redirect
+      - traefik.http.services.file.loadbalancer.server.port=80
+      #Secure
+      - traefik.http.routers.file-secure.entrypoints=https
+      - traefik.http.routers.file-secure.rule=Host(`file.${DOMAIN}`)
+      - traefik.http.routers.file-secure.tls=true
+    #  - traefik.http.routers.file-secure.middlewares=forward-auth-verify
+      - traefik.http.routers.file-secure.service=file
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+ # Immich #
+
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    # extends:
+    #   file: hwaccel.transcoding.yml
+    #   service: cpu # set to one of [nvenc, quicksync, rkmpp, vaapi, vaapi-wsl] for accelerated transcoding
+    environment:
+      REDIS_HOSTNAME: immich_redis
+      DB_HOSTNAME: immich_postgres
+      DB_PASSWORD: ${IMMICH_DB_PASSWORD}
+      DB_USERNAME: ${IMMICH_DB_USERNAME}
+      DB_DATABASE_NAME: ${IMMICH_DB_DATABASE}
+    volumes:
+      - '/data/bindmounts/seafile/export/${EMAIL_ME}:/user/moritz'
+      - '/data/bindmounts/immich/storage:/usr/src/app/upload'
+      - '/etc/localtime:/etc/localtime:ro'
+    depends_on:
+      - immich-redis
+      - immich-database
+    network_mode: web
+    dns: ["${DNS_SERVER}"]
+    restart: always
+    healthcheck:
+      disable: false
+    labels:
+    # Traefik
+      - traefik.enable=true
+      - traefik.http.routers.immich.entrypoints=http
+      - traefik.http.routers.immich.rule=Host(`immich.${DOMAIN}`)
+      - traefik.http.routers.immich.middlewares=traefik-https-redirect
+      - traefik.http.services.immich.loadbalancer.server.port=2283
+      #Secure
+      - traefik.http.routers.immich-secure.entrypoints=https
+      - traefik.http.routers.immich-secure.rule=Host(`immich.${DOMAIN}`)
+      - traefik.http.routers.immich-secure.tls=true
+    #  - traefik.http.routers.immich-secure.middlewares=forward-auth-verify
+      - traefik.http.routers.immich-secure.service=immich
+    # Watchtower
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    # For hardware acceleration, add one of -[armnn, cuda, openvino] to the image tag.
+    # Example tag: ${IMMICH_VERSION:-release}-cuda
+    image: ghcr.io/immich-app/immich-machine-learning:release
+    environment:
+      REDIS_HOSTNAME: immich_redis
+    # extends: # uncomment this section for hardware acceleration - see https://immich.app/docs/features/ml-hardware-acceleration
+    #   file: hwaccel.ml.yml
+    #   service: cpu # set to one of [armnn, cuda, openvino, openvino-wsl] for accelerated inference - use the `-wsl` version for WSL2 where applicable
+    volumes:
+      - '/data/bindmounts/immich/mlcache:/cache'
+    network_mode: web
+    dns: ["${DNS_SERVER}"]
+    restart: always
+    healthcheck:
+      disable: false
+
+  immich-redis:
+    container_name: immich_redis
+    image: docker.io/redis:6.2-alpine@sha256:eaba718fecd1196d88533de7ba49bf903ad33664a92debb24660a922ecd9cac8
+    environment:
+      REDIS_HOSTNAME: immich_redis
+    healthcheck:
+      test: redis-cli ping || exit 1
+    network_mode: web
+    dns: ["${DNS_SERVER}"]
+    restart: always
+
+  immich-database:
+    container_name: immich_postgres
+    image: docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0@sha256:90724186f0a3517cf6914295b5ab410db9ce23190a2d9d0b9dd6463e3fa298f0
+    environment:
+      POSTGRES_PASSWORD: ${IMMICH_DB_PASSWORD}
+      POSTGRES_USER: ${IMMICH_DB_USERNAME}
+      POSTGRES_DB: ${IMMICH_DB_DATABASE}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+      REDIS_HOSTNAME: immich_redis
+    volumes:
+      # Do not edit the next line. If you want to change the database storage location on your system, edit the value of DB_DATA_LOCATION in the .env file
+      - '/data/bindmounts/immich/db:/var/lib/postgresql/data'
+      - '/data/bindmounts/immich/db/backup:/backup'
+    healthcheck:
+      test: >-
+        pg_isready --dbname="$${POSTGRES_DB}" --username="$${POSTGRES_USER}" || exit 1;
+        Chksum="$$(psql --dbname="$${POSTGRES_DB}" --username="$${POSTGRES_USER}" --tuples-only --no-align
+        --command='SELECT COALESCE(SUM(checksum_failures), 0) FROM pg_stat_database')";
+        echo "checksum failure count is $$Chksum";
+        [ "$$Chksum" = '0' ] || exit 1
+      interval: 5m
+      start_interval: 30s
+      start_period: 5m
+    command: >-
+      postgres
+      -c shared_preload_libraries=vectors.so
+      -c 'search_path="$$user", public, vectors'
+      -c logging_collector=on
+      -c max_wal_size=2GB
+      -c shared_buffers=512MB
+      -c wal_compression=on
+    network_mode: web
+    dns: ["${DNS_SERVER}"]
+    restart: always
+
+networks:
+  web:
+    driver: bridge
+    name: web
+    ipam:
+      driver: default
+      config:
+        - subnet: "172.21.0.0/16"
